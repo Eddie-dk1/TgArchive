@@ -16,12 +16,15 @@ from telethon import TelegramClient, errors
 
 from .core import atomic_text, dumps, export_channel
 from .common import format_bytes, format_duration
+from .issues import read_issues, PAGE_SIZE as ISSUES_PAGE_SIZE
+from .paths import private_directory
+from . import __version__
 from .ui import configure_theme, panel, archive_mark, Progress, FONT, BG, SURFACE, INK, MUTED, LINE, PALE
 from .auth import authorize_qr, session_key, forget_local_account
 from .desktop import find_tdata, connection_info, saved_client, import_desktop
 
 BASE = Path(__file__).resolve().parent.parent
-PRIVATE = BASE / '.private'
+PRIVATE = private_directory(BASE)
 
 
 class App(tk.Tk):
@@ -43,6 +46,8 @@ class App(tk.Tk):
         self.dialogs = []
         self.visible_dialogs = []
         self.archive_path = None
+        self.issues_window = None
+        self.issues_data = None
         self.progress_text = tk.StringVar(value='Подключите Telegram, затем выберите канал для сохранения.')
         self.search = tk.StringVar()
         self.export_mode = tk.StringVar(value='Продолжить загрузку')
@@ -216,7 +221,7 @@ class App(tk.Tk):
         ttk.Label(footer, text='Очередь сохраняется при остановке.', style='Muted.TLabel', font=(FONT, 11)).pack(side='left')
         self.open_button = ttk.Button(footer, text='Открыть архив', state='disabled', command=self.open_archive, style='Quiet.TButton')
         self.open_button.pack(side='right')
-        self.report_button = ttk.Button(footer, text='Отчёт об ошибках', state='disabled', command=self.open_report, style='Quiet.TButton')
+        self.report_button = ttk.Button(footer, text='Проблемные файлы', command=self._show_issues, style='Quiet.TButton')
         self.report_button.pack(side='right', padx=4)
         ttk.Button(footer, text='Журнал', command=self._show_log, style='Quiet.TButton').pack(side='right')
         self.bind('<Command-f>', self._focus_search)
@@ -398,6 +403,7 @@ class App(tk.Tk):
         self.load_button.configure(state='normal' if self.connected and not busy else 'disabled')
         self.stop_button.configure(state='normal' if busy else 'disabled')
         self.mode_box.configure(state='disabled' if busy else 'readonly')
+        self._issue_actions()
         self._selection_changed()
 
     def emit(self, kind, value):
@@ -439,7 +445,7 @@ class App(tk.Tk):
                 me = await client.get_me()
             else:
                 client = TelegramClient(str(PRIVATE / token), int(config['api_id']), config['api_hash'],
-                                        device_model='Mac — Telegram Archive', app_version='1.0',
+                                        device_model='Mac — Telegram Archive', app_version=__version__,
                                         flood_sleep_threshold=0, receive_updates=True, **kwargs)
             if config['login_method'] == 'Номер телефона':
                 await client.start(phone=config['phone'], code_callback=code, password=password)
@@ -468,7 +474,7 @@ class App(tk.Tk):
                 entity = await client.get_entity(selected['id'])
                 if getattr(entity, 'noforwards', False):
                     self.emit('log', 'В канале включена защита контента. Читаю доступные посты через API.')
-                mode = 'full' if config['export_mode'] == 'Полная сверка' else 'resume'
+                mode = 'retry' if action == 'retry' else 'full' if config['export_mode'] == 'Полная сверка' else 'resume'
                 await export_channel(client, entity, output, self.emit, mode=mode)
         finally:
             if client is not None:
@@ -488,11 +494,11 @@ class App(tk.Tk):
             return
         self.current_action = action
         self._busy(True)
-        self.phase_text.set('Подключение' if action != 'export' else 'Подготовка')
+        self.phase_text.set('Подключение' if action not in ('export','retry') else 'Подготовка')
         self.phase_badge.configure(style='Badge.TLabel')
         self.progress_text.set('Подключение к Telegram…')
         self.percent_text.set('0%')
-        if action == 'export':
+        if action in ('export', 'retry'):
             for value in self.metric_values:
                 value.set('—')
         self.cancel_requested.clear()
@@ -728,6 +734,9 @@ class App(tk.Tk):
                     self.archive_path = Path(value)
                     self.open_button.configure(state='normal')
                     self.report_button.configure(state='normal')
+                elif kind == 'issues_changed':
+                    if self.issues_data and self.issues_data['root'] == Path(value):
+                        self._reload_issues(self.issues_data['offset'])
                 elif kind == 'error' and not self.closing:
                     self.phase_text.set('Не завершено')
                     self.phase_badge.configure(style='ErrorBadge.TLabel')
@@ -780,7 +789,7 @@ class App(tk.Tk):
             self.metric_values[2].set(f'{data["files_errors"]} / {data["files_unavailable"]}')
             phase = data['phase']
             titles = {'prepare': 'Подготовка', 'history': 'Сохраняем сообщения', 'export': 'Создаём архив',
-                      'gaps': 'Проверяем пропуски', 'media': 'Скачиваем файлы',
+                      'gaps': 'Проверяем пропуски', 'verify': 'Проверяем SHA-256', 'media': 'Скачиваем файлы',
                       'cancelled': 'Остановлено · можно продолжить', 'finished': 'Завершено'}
             problems = data['files_errors'] + data['files_unavailable']
             title = 'Завершено с пропусками' if phase == 'finished' and problems else titles.get(phase, 'Загрузка')
@@ -794,6 +803,124 @@ class App(tk.Tk):
         if data['phase'] in ('finished', 'cancelled'):
             self.file_text.set('Текущий файл: —')
             self.file_progress['value'] = 0
+
+    def _show_issues(self):
+        if self.issues_window is not None and self.issues_window.winfo_exists():
+            self._reload_issues(self.issues_data['offset'])
+            self.issues_window.lift()
+            return
+        folder = self.archive_path or filedialog.askdirectory(parent=self,
+            title='Выберите папку channel_<ID> сохранённого архива', mustexist=True)
+        if not folder:
+            return
+        try:
+            self.issues_data = read_issues(folder)
+        except Exception as exc:
+            messagebox.showerror('Не удалось открыть архив', str(exc), parent=self)
+            return
+        self.issues_window = window = tk.Toplevel(self, background=BG)
+        window.title('Проблемные файлы · Telegram Archive')
+        window.geometry('900x530')
+        window.minsize(880, 530)
+        window.transient(self)
+        window.bind('<Escape>', lambda _: window.destroy())
+        body = ttk.Frame(window, padding=20)
+        body.pack(fill='both', expand=True)
+        self.issues_heading = tk.StringVar()
+        self.issues_caption = tk.StringVar()
+        self.issue_detail = tk.StringVar(value='Выберите строку, чтобы увидеть причину целиком.')
+        ttk.Label(body, textvariable=self.issues_heading, font=(FONT, 18, 'bold')).pack(anchor='w')
+        ttk.Label(body, textvariable=self.issues_caption, style='Muted.TLabel').pack(anchor='w', pady=(7, 12))
+        listing = ttk.Frame(body)
+        listing.pack(fill='both', expand=True)
+        self.issues_tree = ttk.Treeview(listing, columns=('status','attempts','reason'), show='tree headings', selectmode='browse', height=6)
+        for column, title, width in (('#0','Пост',90), ('status','Состояние',160), ('attempts','Попыток',70), ('reason','Причина',450)):
+            self.issues_tree.heading(column, text=title, anchor='w')
+            self.issues_tree.column(column, width=width, minwidth=50, stretch=column=='reason')
+        scroll = ttk.Scrollbar(listing, orient='vertical', command=self.issues_tree.yview)
+        self.issues_tree.configure(yscrollcommand=scroll.set)
+        self.issues_tree.pack(side='left', fill='both', expand=True)
+        scroll.pack(side='right', fill='y')
+        self.issues_tree.bind('<<TreeviewSelect>>', self._issue_selected)
+        ttk.Label(body, textvariable=self.issue_detail, style='Muted.TLabel', wraplength=840).pack(anchor='w', pady=(12, 8))
+        actions = ttk.Frame(body)
+        actions.pack(fill='x', pady=(4, 0))
+        self.retry_button = ttk.Button(actions, text='Повторить проблемные', style='Primary.TButton', command=self._retry_issues)
+        self.retry_button.pack(side='left')
+        self.issue_open_button = ttk.Button(actions, text='Открыть пост', command=self._open_issue_post, state='disabled')
+        self.issue_open_button.pack(side='left', padx=8)
+        ttk.Button(actions, text='HTML-отчёт', command=self._open_issues_report).pack(side='left')
+        self.issues_next = ttk.Button(actions, text='Далее', command=lambda: self._reload_issues(self.issues_data['offset']+ISSUES_PAGE_SIZE))
+        self.issues_next.pack(side='right')
+        self.issues_previous = ttk.Button(actions, text='Назад', command=lambda: self._reload_issues(self.issues_data['offset']-ISSUES_PAGE_SIZE))
+        self.issues_previous.pack(side='right', padx=8)
+        bottom = ttk.Frame(body)
+        bottom.pack(fill='x', pady=(10,0))
+        ttk.Label(bottom, text='Повтор затрагивает ошибки и недоступные вложения. Ожидающие файлы — через «Продолжить загрузку».',
+                  style='Muted.TLabel', font=(FONT, 11), wraplength=600).pack(side='left')
+        ttk.Button(bottom, text='Другой архив', command=self._choose_issues_archive, style='Quiet.TButton').pack(side='right')
+        self._reload_issues(0)
+
+    def _choose_issues_archive(self):
+        folder = filedialog.askdirectory(parent=self.issues_window, title='Папка channel_<ID>', mustexist=True)
+        if folder:
+            self._reload_issues(0, folder)
+
+    def _reload_issues(self, offset=0, folder=None):
+        if self.issues_window is None or not self.issues_window.winfo_exists():
+            return
+        try:
+            self.issues_data = read_issues(folder or self.issues_data['root'], offset)
+        except Exception as exc:
+            messagebox.showerror('Не удалось прочитать архив', str(exc), parent=self.issues_window)
+            return
+        data = self.issues_data
+        self.issues_heading.set(data['title'][:80])
+        start = data['offset']+1 if data['total'] else 0
+        self.issues_caption.set(f'Не сохранено: {data["total"]} · можно повторить: {data["retryable"]} · показано {start}–{data["offset"]+len(data["rows"])}')
+        self.issues_tree.delete(*self.issues_tree.get_children())
+        labels = {'error':'Ошибка', 'unavailable':'Недоступно в Telegram', 'pending':'Ожидает загрузки', 'downloading':'Загружается'}
+        for row in data['rows']:
+            self.issues_tree.insert('', 'end', iid=str(row['id']), text=f'#{row["id"]}',
+                values=(labels.get(row['status'],row['status']),row['attempts'],row['error'] or 'Ещё не скачан'))
+        self.issue_detail.set('Все файлы сохранены.' if not data['total'] else 'Выберите строку, чтобы увидеть причину целиком.')
+        self.issue_open_button.configure(state='disabled')
+        self.issues_previous.configure(state='normal' if data['offset'] else 'disabled')
+        self.issues_next.configure(state='normal' if data['offset']+ISSUES_PAGE_SIZE < data['total'] else 'disabled')
+        self._issue_actions()
+
+    def _issue_actions(self):
+        if self.issues_window is not None and self.issues_window.winfo_exists() and hasattr(self, 'retry_button'):
+            self.retry_button.configure(state='normal' if self.issues_data['retryable'] and not self.is_busy else 'disabled')
+
+    def _issue_selected(self, _event=None):
+        selection = self.issues_tree.selection()
+        row = next((r for r in self.issues_data['rows'] if selection and str(r['id'])==selection[0]), None)
+        if row:
+            reason = row['error'] or 'Файл ещё не скачан. Используйте продолжение загрузки.'
+            self.issue_detail.set(reason[:450] + ('… Полный текст — в HTML-отчёте.' if len(reason)>450 else ''))
+            self.issue_open_button.configure(state='normal' if (row['link'] or '').startswith('https://t.me/') else 'disabled')
+
+    def _open_issue_post(self):
+        selection = self.issues_tree.selection()
+        row = next((r for r in self.issues_data['rows'] if selection and str(r['id'])==selection[0]), None)
+        if row and (row['link'] or '').startswith('https://t.me/'):
+            webbrowser.open(row['link'])
+
+    def _open_issues_report(self):
+        path = self.issues_data['root'] / 'report.html'
+        if path.exists():
+            webbrowser.open(path.as_uri())
+
+    def _retry_issues(self):
+        if self.is_busy:
+            return
+        self._reload_issues(self.issues_data['offset'])
+        data = self.issues_data
+        if not data['retryable']:
+            return
+        selected = {key: data[key] for key in ('id','account_id','title')}
+        self._start('retry', selected=selected, output=str(data['root'].parent))
 
     def open_report(self):
         if self.archive_path and (self.archive_path / 'report.html').exists():
@@ -814,7 +941,7 @@ class App(tk.Tk):
 
 def main():
     os.umask(0o077)
-    PRIVATE.mkdir(mode=0o700, exist_ok=True)
+    PRIVATE.mkdir(parents=True, mode=0o700, exist_ok=True)
     PRIVATE.chmod(0o700)
     # Keep the descriptor open for the entire process; never unlink the lock file.
     lock = (PRIVATE / 'app.lock').open('a')

@@ -1,0 +1,53 @@
+name: Test and build macOS app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Python with bundled Tcl/Tk
+        shell: bash
+        run: |
+          curl -fsSL https://www.python.org/ftp/python/3.14.3/python-3.14.3-macos11.pkg -o "$RUNNER_TEMP/python.pkg"
+          echo "50b709f72cb5ed87d5882901923face981dd657569717761832c36db3bf08238  $RUNNER_TEMP/python.pkg" | shasum -a 256 -c -
+          sudo installer -pkg "$RUNNER_TEMP/python.pkg" -target /
+          echo /Library/Frameworks/Python.framework/Versions/3.14/bin >> "$GITHUB_PATH"
+      - name: Install runtime and build dependencies
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install -r requirements-build.txt
+      - name: Run engine and native UI tests offline
+        env:
+          TG_ARCHIVE_GUI_TESTS: '1'
+        run: .venv/bin/python -m unittest discover -s tests -v
+      - name: Build standalone app and verify signature
+        run: .venv/bin/python tools/build_macos.py
+      - name: Exercise the bundled GUI without an account
+        run: .venv/bin/python tools/smoke_macos.py
+      - name: Upload app and checksum
+        uses: actions/upload-artifact@v7
+        with:
+          name: Telegram-Archive-macOS-${{ matrix.architecture }}
+          path: |
+            dist/Telegram-Archive-macOS-${{ matrix.architecture }}.zip
+            dist/Telegram-Archive-macOS-${{ matrix.architecture }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 30

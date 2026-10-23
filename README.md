@@ -13,6 +13,9 @@ Built with Python, Tkinter, Telethon, and SQLite. The interface is currently in 
 - Stop and resume interrupted exports, including partially downloaded files.
 - Run a full history check to collect new posts and update existing messages.
 - Track messages, files, errors, transferred bytes, speed, and estimated time remaining.
+- Detect changed or corrupted local files with SHA-256 and restore them on resume.
+- View unfinished attachments in the app and retry failures without scanning history again.
+- Build a standalone macOS `.app` with an icon; CI produces Apple Silicon and Intel artifacts.
 - Browse saved messages in HTML; use JSONL, CSV, and SQLite for further processing.
 - Inspect persistent run logs, failed downloads, and gaps in message IDs.
 
@@ -24,7 +27,15 @@ Built with Python, Tkinter, Telethon, and SQLite. The interface is currently in 
 
 The development environment was tested on Apple Silicon with Python 3.14.3 and Tk 8.6. Other environments may need additional dependency setup. Windows and Linux are not currently supported by the launcher or Desktop session discovery.
 
-## Quick start
+## Standalone macOS app
+
+The [GitHub Actions workflow](https://github.com/Eddie-dk1/TgArchive/actions/workflows/macos.yml) tests and builds the app for **Apple Silicon (`arm64`)** and **Intel (`x86_64`)**. Open a successful workflow run and download the artifact for your Mac. Extract the artifact, then its inner ZIP, and move `Telegram Archive.app` to Applications or another writable location. Python does not need to be installed to run the bundle.
+
+The app is ad-hoc signed, not Apple-notarized. macOS may require explicit approval to open it. Developer ID signing and notarization require Apple developer credentials and are not configured in this repository.
+
+The bundle stores its account data in `~/Library/Application Support/Telegram Archive/`, outside the signed application. Source runs keep using `.private/` in the project. These are separate local profiles: connect once on the first `.app` launch; your existing source profile and Telegram Desktop are left in place. Export folders remain wherever you selected them.
+
+## Run from source
 
 ```sh
 git clone https://github.com/Eddie-dk1/TgArchive.git
@@ -109,6 +120,7 @@ channel_<chat_id>/
 ├── gaps.csv            Checked and unverified message-ID gaps
 ├── channel.json        Snapshot boundary, queue state, and counters
 ├── archive.sqlite3     Durable state for resume and updates
+├── SHA256SUMS          Checksums of completed local files
 └── media/
     ├── photos/
     ├── videos/
@@ -119,11 +131,30 @@ channel_<chat_id>/
 
 The HTML viewer shows plain message text and attachments, with up to 500 messages per page. Additional Telegram fields, such as album grouping, entities, and reply metadata, remain available in JSONL and SQLite. CSV exports escape potential spreadsheet formulas; JSONL and SQLite preserve the original text.
 
-Use **Открыть архив** (Open archive) to view saved posts, **Отчёт об ошибках** (Error report) for export issues, or **Журнал** (Log) for application events.
+Use **Открыть архив** (Open archive) to view saved posts, **Проблемные файлы** (Problem files) for unfinished attachments, or **Журнал** (Log) for application events.
+
+### Inspect and retry problem files
+
+Open **Проблемные файлы** after an export, or choose an existing `channel_<chat_id>` folder after restarting the app. The paginated list shows the post ID, current state, total attempts, and failure reason. Select a row to read its reason and open the original Telegram post; the HTML report remains available in that window.
+
+**Повторить проблемные** (Retry problem files) retries failed or previously unavailable attachments only. It does not rescan history, revalidate successful files, or process ordinary pending files. Previously unavailable posts are requested again, but Telegram may still deny access. Use Resume to process the remaining regular queue. Retry checks archive ownership and refuses to process another account's archive.
+
+### File integrity
+
+New downloads receive a SHA-256 digest before being marked complete. Resume and Full check recalculate digests of completed local files; missing, size-mismatched, or hash-mismatched files are queued for repair. Hashing uses bounded memory and can be stopped.
+
+Digests and verification timestamps are stored in SQLite, JSONL, and CSV. The archive also includes `SHA256SUMS` for independent checks:
+
+```sh
+cd /path/to/channel_archive
+shasum -a 256 -c SHA256SUMS
+```
+
+Existing archives without digests receive an initial baseline at their next Resume or Full check, without redownloading unchanged files. This first baseline cannot establish whether a file was already damaged. Hashes detect subsequent local changes; they are not a comparison against an independently supplied Telegram checksum.
 
 ## Local account data
 
-Connection settings and authorization files are stored in `.private/` beside the app. Directory permissions are set to `700` and files to `600`. API hashes and proxy passwords are stored locally in the settings file; login codes, two-step verification passwords, and Desktop passcodes are not saved by the app.
+Source runs store connection settings and authorization files in `.private/` beside the source. The standalone app uses `~/Library/Application Support/Telegram Archive/`. Directory permissions are set to `700` and files to `600`. API hashes and proxy passwords are stored locally in the settings file; login codes, two-step verification passwords, and Desktop passcodes are not saved by the app.
 
 Telegram session files grant account access. Keep `.private/` private. The repository excludes it, virtual environments, downloaded archives, databases, logs, and local development notes through `.gitignore`.
 
@@ -136,7 +167,7 @@ Exports stay in the folder you choose. If that folder is synced with iCloud or a
 - Gaps in message IDs do not necessarily mean lost messages. Up to 1,000 missing IDs are checked per scan; other gaps remain explicitly unverified.
 - Comments in a linked discussion group are a separate chat. Select that group separately if your account has access.
 - Albums retain their message records and shared `grouped_id`; the HTML viewer does not combine them into an album layout.
-- File validation checks existence and expected size, not cryptographic checksums. Corruption that preserves file size may go undetected.
+- SHA-256 detects changes against the locally recorded baseline; it cannot prove that a legacy file was intact before its first checksum was created.
 - Browser video playback depends on codec support. Open the saved file in a compatible player when necessary.
 - SOCKS5 proxies are supported in Connection settings. Telegram MTProxy links are not supported.
 
@@ -148,7 +179,7 @@ Exports stay in the folder you choose. If that folder is synced with iCloud or a
 
 The automated suite covers archive collection, resume, cancellation, retries, migration, gap handling, progress events, QR authentication, local-only sign-out, and Desktop session conversion. Tests use synthetic data and mocked Telegram clients; they do not require a real account or network access.
 
-Four native interface checks are opt-in and require a macOS desktop session:
+Native interface checks are opt-in and require a macOS desktop session:
 
 ```sh
 TG_ARCHIVE_GUI_TESTS=1 .venv/bin/python -m unittest discover -s tests -p test_ui.py -v
@@ -160,6 +191,22 @@ Project modules:
 - `auth.py`, `desktop.py`: QR/phone authentication and local Desktop session import.
 - `core.py`: history collection, media queue, retries, and gap verification.
 - `storage.py`, `common.py`: SQLite state, exports, and shared helpers.
+- `integrity.py`, `issues.py`: cooperative hashing and read-only archive inspection.
+- `paths.py`: writable profile location for source and bundled execution.
+
+## Build the macOS app
+
+Use a macOS Python installation with bundled Tcl/Tk (the python.org installer is used by CI). Build on the architecture you want to distribute:
+
+```sh
+.venv/bin/python -m pip install -r requirements-build.txt
+.venv/bin/python tools/build_macos.py
+.venv/bin/python tools/smoke_macos.py
+```
+
+Outputs are `dist/Telegram Archive.app`, an architecture-specific ZIP, and its checksum. The build explicitly collects application dependencies and the license, excludes account data, verifies the bundle signature, and checks for unexpected runtime files before creating the ZIP. The smoke check creates a temporary profile, imports Desktop and SOCKS5 support, opens the UI, renders a QR code, and exercises the problem-file window without network access or a real account.
+
+The workflow runs on pushes to `main`, pull requests, and manual dispatch. Both architecture jobs run engine and native UI tests, build the app, execute the bundle smoke check, and upload ZIPs with checksums. Artifacts are retained for 30 days. Build products, local smoke data, and account profiles are not committed.
 
 ## Credits and license
 

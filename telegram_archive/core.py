@@ -13,6 +13,7 @@ from telethon.tl.types import InputPhotoFileLocation
 
 from .common import BLOCK, PAGE_SIZE, atomic_text, classify_message, dumps, now, safe_name
 from .storage import Archive
+from .integrity import file_sha256
 
 MAX_GAP_CHECK_IDS = 1000
 BATCH_SIZE = 100
@@ -196,20 +197,41 @@ async def check_gaps(client, entity, archive, progress):
                          f'не проверено {gap_counts["unverified"]}. Это не число потерянных файлов.')
 
 
-async def verify_local_files(archive):
+async def verify_local_files(archive, progress=None):
     repaired = 0
-    for index, row in enumerate(archive.db.execute("SELECT id,path,size,expected_size FROM messages WHERE status='done'")):
+    rows = archive.db.execute("SELECT id,path,size,expected_size,sha256 FROM messages WHERE status='done'").fetchall()
+    if progress:
+        progress.stage('verify', 'Проверяю целостность сохранённых файлов (SHA-256)…')
+    for index, row in enumerate(rows, 1):
         path = archive.root / row['path'] if row['path'] else None
-        if (path is None or not path.is_file() or path.stat().st_size != row['size'] or
-                (row['expected_size'] is not None and row['expected_size'] != row['size'])):
+        reason = None
+        digest = None
+        try:
+            if (path is None or not path.is_file() or path.stat().st_size != row['size'] or
+                    (row['expected_size'] is not None and row['expected_size'] != row['size'])):
+                reason = 'Файл отсутствует или его размер не совпал'
+            else:
+                digest = await file_sha256(path)
+                if row['sha256'] and digest != row['sha256']:
+                    reason = 'Контрольная сумма SHA-256 не совпала: файл изменён или повреждён'
+                    archive.log('checksum_mismatch', message_id=row['id'], phase='verify', level='warning', detail=reason)
+        except OSError as exc:
+            reason = f'Не удалось проверить файл: {exc}'
+        if reason:
             with archive.db:
-                archive.db.execute("UPDATE messages SET status=CASE WHEN availability='available' THEN 'pending' ELSE 'unavailable' END WHERE id=?", (row['id'],))
-            archive.log('local_file_requeued', message_id=row['id'], phase='prepare', level='warning',
-                        detail='Файл отсутствует или его размер не совпал')
+                archive.db.execute("UPDATE messages SET status=CASE WHEN availability='available' THEN 'pending' ELSE 'unavailable' END, error=? WHERE id=?", (reason, row['id']))
+            archive.log('local_file_requeued', message_id=row['id'], phase='verify', level='warning', detail=reason)
             repaired += 1
-        if index % 100 == 0:
-            await asyncio.sleep(0)
-    archive.log('local_files_checked', phase='prepare', detail=f'Requeued: {repaired}')
+        else:
+            with archive.db:
+                archive.db.execute('UPDATE messages SET sha256=?,verified_at=? WHERE id=?', (digest, now(), row['id']))
+            if not row['sha256']:
+                archive.log('checksum_created', message_id=row['id'], phase='verify', detail='Initial baseline for an existing file; previous integrity is unknown')
+        if progress:
+            progress.emit('status', f'Проверка SHA-256: {index} / {len(rows)} · требуют восстановления: {repaired}')
+        await asyncio.sleep(0)
+    archive.log('local_files_checked', phase='verify', detail=f'Checked: {len(rows)}; requeued: {repaired}')
+
 
 
 def file_target(message, archive, category, key):
@@ -234,10 +256,13 @@ async def download_file(client, message, archive, category, key, emit, progress=
         location = InputPhotoFileLocation(id=photo.id, access_hash=photo.access_hash,
                                           file_reference=photo.file_reference, thumb_size=rendition.type)
     # A crash can happen after the final rename and before the SQLite update.
+    trusted = archive.db.execute('SELECT sha256 FROM messages WHERE id=?', (message.id,)).fetchone()['sha256']
     if expected is not None and target.is_file() and target.stat().st_size == expected:
-        archive.media_result(message.id, 'done', target.relative_to(archive.root).as_posix(), expected)
-        archive.log('completed_file_recovered', message_id=message.id)
-        return expected
+        digest = await file_sha256(target)
+        if not trusted or digest == trusted:
+            archive.media_result(message.id, 'done', target.relative_to(archive.root).as_posix(), expected, sha256=digest)
+            archive.log('completed_file_recovered', message_id=message.id)
+            return expected
     offset = partial.stat().st_size // BLOCK * BLOCK if partial.exists() else 0
     if expected is not None and offset > expected:
         offset = 0
@@ -269,8 +294,11 @@ async def download_file(client, message, archive, category, key, emit, progress=
         raise OSError(f'Размер файла не совпал: {offset} / {expected}')
     if offset == 0 and expected != 0:
         raise OSError('Telegram вернул пустой файл')
+    emit('status', f'Проверяю SHA-256 скачанного файла #{message.id}…')
+    digest = await file_sha256(partial)
+    # Publish the completed target and its digest only after hashing succeeds.
     partial.replace(target)
-    archive.media_result(message.id, 'done', target.relative_to(archive.root).as_posix(), offset)
+    archive.media_result(message.id, 'done', target.relative_to(archive.root).as_posix(), offset, sha256=digest)
     emit('progress', (message.id, offset, expected))
     archive.log('file_completed', message_id=message.id, detail=f'bytes={offset}')
     return offset
@@ -281,12 +309,13 @@ async def fetch_messages(client, entity, ids, archive, progress):
     return {m.id: m for m in messages if m is not None and hasattr(m, 'message')}
 
 
-async def download_queue(client, entity, archive, progress):
+async def download_queue(client, entity, archive, progress, retry_only=False):
     progress.stage('media', 'Скачиваю вложения из сохранённой очереди…')
     cursor = 0
     while True:
-        rows = archive.db.execute('''SELECT id,status FROM messages WHERE id>? AND category IS NOT NULL
-            AND availability='available' AND status!='done' ORDER BY id LIMIT ?''', (cursor, BATCH_SIZE)).fetchall()
+        condition = "id IN (SELECT id FROM retry_targets)" if retry_only else "availability='available'"
+        rows = archive.db.execute(f'''SELECT id,status FROM messages WHERE id>? AND category IS NOT NULL
+            AND {condition} AND status!='done' ORDER BY id LIMIT ?''', (cursor, BATCH_SIZE)).fetchall()
         if not rows:
             return
         found = await fetch_messages(client, entity, [r['id'] for r in rows], archive, progress)
@@ -297,10 +326,13 @@ async def download_queue(client, entity, archive, progress):
             message = found.get(mid)
             if message is None:
                 archive.unavailable(mid, 'Telegram не вернул пост при получении вложения')
-                progress.finish_file(previous_error=previous_error, unavailable=True)
+                progress.refresh()
+                progress.active_id, progress.active_bytes, progress.active_total = None, 0, None
+                progress.publish()
                 continue
             before = archive.db.execute('SELECT media_key,expected_size FROM messages WHERE id=?', (mid,)).fetchone()
             category, key, status = archive.remember(message)
+            progress.refresh()
             if not category:
                 archive.log('media_removed', message_id=mid, detail='Во время загрузки у поста больше нет вложения')
                 progress.refresh(); progress.active_id = None; progress.publish()
@@ -365,8 +397,10 @@ async def download_queue(client, entity, archive, progress):
 
 
 async def export_channel(client, entity, output, emit, mode='full'):
-    if mode not in ('full', 'resume'):
+    if mode not in ('full', 'resume', 'retry'):
         raise ValueError('Неизвестный режим выгрузки')
+    if mode == 'retry' and not (Path(output) / f'channel_{utils.get_peer_id(entity)}' / 'archive.sqlite3').is_file():
+        raise ValueError('Для повтора выберите существующий архив.')
     me = await client.get_me()
     archive = Archive(output, entity, me.id)
     progress = Progress(archive, emit)
@@ -374,14 +408,24 @@ async def export_channel(client, entity, output, emit, mode='full'):
     outcome = 'failed'
     try:
         archive.start_run(mode)
-        await collect_history(client, entity, archive, progress, mode)
-        # All post texts and the durable queue are exported before any media transfer.
-        progress.stage('export', 'Сохраняю собранную историю…')
-        archive.export(False)
-        await check_gaps(client, entity, archive, progress)
-        await verify_local_files(archive)
-        archive.export(False)
-        await download_queue(client, entity, archive, progress)
+        if mode == 'retry':
+            if not archive.state:
+                raise ValueError('Сначала откройте старый архив в режиме «Продолжить загрузку».')
+            archive.db.execute('CREATE TEMP TABLE retry_targets (id INTEGER PRIMARY KEY)')
+            archive.db.execute("""INSERT INTO retry_targets SELECT id FROM messages
+                WHERE category IS NOT NULL AND status!='done'
+                AND (status IN ('error','unavailable') OR error IS NOT NULL)""")
+            count = archive.db.execute('SELECT count(*) FROM retry_targets').fetchone()[0]
+            archive.log('retry_requested', phase='prepare', detail=f'Failed or unavailable attachments: {count}')
+        else:
+            await collect_history(client, entity, archive, progress, mode)
+            # All post texts and the durable queue are exported before media transfer.
+            progress.stage('export', 'Сохраняю собранную историю…')
+            archive.export(False)
+            await check_gaps(client, entity, archive, progress)
+            await verify_local_files(archive, progress)
+            archive.export(False)
+        await download_queue(client, entity, archive, progress, retry_only=mode == 'retry')
         progress.refresh()
         stats = progress.stats
         outcome = 'complete' if not stats['files_pending'] and not stats['files_unavailable'] else 'completed_with_issues'
@@ -400,11 +444,12 @@ async def export_channel(client, entity, output, emit, mode='full'):
             progress.stage('cancelled' if outcome == 'cancelled' else 'finished',
                            'Сохраняю результаты остановки…' if outcome == 'cancelled' else 'Сохраняю результаты…')
             archive.export(outcome == 'complete')
+            emit('issues_changed', str(archive.root))
             emit('log', f'В архиве: {progress.stats["archived_messages"]} сообщений; '
                         f'файлов: {progress.stats["files_done"]}/{progress.stats["files_total"]}; '
                         f'ошибок: {progress.stats["files_errors"]}; недоступно: {progress.stats["files_unavailable"]}.')
             if outcome in ('complete', 'completed_with_issues'):
-                emit('status', 'Готово' if outcome == 'complete' else 'Часть файлов требует внимания — откройте «Ошибки и журнал».')
+                emit('status', 'Готово' if outcome == 'complete' else 'Часть файлов требует внимания — откройте «Проблемные файлы».')
         except Exception as exc:
             if not active_exception:
                 raise

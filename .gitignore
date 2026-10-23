@@ -55,3 +55,10 @@ dist/
 ._*
 .AppleDouble
 .LSOverride
+
+# Generated bundle metadata and local smoke profiles
+*.spec.bak
+*.app/
+*.zip
+*.zip.sha256
+SHA256SUMS

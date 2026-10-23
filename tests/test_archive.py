@@ -165,7 +165,7 @@ class ArchiveTests(unittest.IsolatedAsyncioTestCase):
         client.flood = True
         with patch('telegram_archive.core.asyncio.sleep', new=AsyncMock()) as sleep:
             path = await export_channel(client, channel(), self.root, self.emit)
-        sleep.assert_awaited_with(2)
+        sleep.assert_any_await(2)
         self.assertEqual(client.downloads, [10, 10])
         self.assertEqual(json.loads((path / 'messages.jsonl').read_text())['status'], 'done')
 

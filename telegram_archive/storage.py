@@ -41,11 +41,13 @@ class Archive:
             if owner is not None and owner != account_id:
                 raise ValueError('Этот архив создан другим аккаунтом. Выберите другую папку.')
             columns = {r['name'] for r in self.db.execute('PRAGMA table_info(messages)')}
-            migration = self.get_meta('schema_version', 1) < 2
+            previous_version = self.get_meta('schema_version', 1)
+            migration = previous_version < 2
             with self.db:
                 for name, definition in (
                     ('expected_size', 'INTEGER'), ('attempts', 'INTEGER NOT NULL DEFAULT 0'),
                     ('availability', "TEXT NOT NULL DEFAULT 'available'"), ('seen_scan', 'TEXT'),
+                    ('sha256', 'TEXT'), ('verified_at', 'TEXT'),
                 ):
                     if name not in columns:
                         self.db.execute(f'ALTER TABLE messages ADD COLUMN {name} {definition}')
@@ -71,15 +73,15 @@ class Archive:
                                         (expected_size(json.loads(row['raw'])), row['id']))
                 self.db.execute("UPDATE messages SET status='pending' WHERE status='downloading'")
             self.set_meta('account_id', account_id)
-            self.set_meta('schema_version', 2)
+            self.set_meta('schema_version', 3)
             self.state = self.get_meta('scan_state')
             self.info = {'chat_id': self.chat_id, 'title': entity.title,
                          'username': getattr(entity, 'username', None), 'account_id': account_id,
                          'content_protected': bool(getattr(entity, 'noforwards', False)),
-                         'schema_version': 2,
+                         'schema_version': 3,
                          'scope': 'Channel posts visible to this account; discussion replies are separate.'}
-            if migration:
-                self.log('schema_migrated', phase='prepare', detail='SQLite schema upgraded to version 2')
+            if previous_version < 3:
+                self.log('schema_migrated', phase='prepare', detail='SQLite schema upgraded to version 3')
         except BaseException:
             self.close()
             raise
@@ -150,15 +152,17 @@ class Archive:
                       text=message.message or '', category=category, media_key=key, path=path,
                       size=size, status=status, error=old['error'] if same else None, link=link,
                       raw=dumps(raw), expected_size=expected, attempts=old['attempts'] if old else 0,
-                      availability='available', seen_scan=scan_id or (old['seen_scan'] if old else None))
+                      availability='available', seen_scan=scan_id or (old['seen_scan'] if old else None),
+                      sha256=old['sha256'] if same else None, verified_at=old['verified_at'] if same else None)
         with self.db:
             self.db.execute('''INSERT INTO messages
-                (id,date,text,category,media_key,path,size,status,error,link,raw,expected_size,attempts,availability,seen_scan)
-                VALUES (:id,:date,:text,:category,:media_key,:path,:size,:status,:error,:link,:raw,:expected_size,:attempts,:availability,:seen_scan)
+                (id,date,text,category,media_key,path,size,status,error,link,raw,expected_size,attempts,availability,seen_scan,sha256,verified_at)
+                VALUES (:id,:date,:text,:category,:media_key,:path,:size,:status,:error,:link,:raw,:expected_size,:attempts,:availability,:seen_scan,:sha256,:verified_at)
                 ON CONFLICT(id) DO UPDATE SET date=excluded.date,text=excluded.text,category=excluded.category,
                 media_key=excluded.media_key,path=excluded.path,size=excluded.size,status=excluded.status,
                 error=excluded.error,link=excluded.link,raw=excluded.raw,expected_size=excluded.expected_size,
-                availability=excluded.availability,seen_scan=excluded.seen_scan''', record)
+                availability=excluded.availability,seen_scan=excluded.seen_scan,
+                sha256=excluded.sha256,verified_at=excluded.verified_at''', record)
             if advance:
                 self.state['cursor'] = message.id
                 self.state['seen'] += int(not old or old['seen_scan'] != scan_id)
@@ -168,10 +172,14 @@ class Archive:
                      detail='Файл отсутствует или его размер не совпал')
         return category, key, status
 
-    def media_result(self, mid, status, path=None, size=None, error=None):
+    def media_result(self, mid, status, path=None, size=None, error=None, sha256=None):
         with self.db:
-            self.db.execute('UPDATE messages SET status=?,path=?,size=?,error=? WHERE id=?',
-                            (status, path, size, error, mid))
+            if status == 'done':
+                self.db.execute('UPDATE messages SET status=?,path=?,size=?,error=?,sha256=?,verified_at=? WHERE id=?',
+                                (status, path, size, error, sha256, now() if sha256 else None, mid))
+            else:
+                # Preserve the trusted digest and old target across a failed repair.
+                self.db.execute('UPDATE messages SET status=?,error=? WHERE id=?', (status, error, mid))
 
     def unavailable(self, mid, reason):
         with self.db:
@@ -249,7 +257,7 @@ class Archive:
         (self.root / 'gaps.csv.tmp').replace(self.root / 'gaps.csv')
         self.info['id_gaps'] = gap_counts
         atomic_text(self.root / 'channel.json', dumps(self.info))
-        fields = ['id', 'date', 'text', 'category', 'path', 'status', 'error', 'link', 'expected_size', 'attempts', 'availability']
+        fields = ['id', 'date', 'text', 'category', 'path', 'status', 'error', 'link', 'expected_size', 'attempts', 'availability', 'sha256', 'verified_at']
         with (self.root / 'messages.jsonl.tmp').open('w', encoding='utf-8') as jf, \
              (self.root / 'messages.csv.tmp').open('w', encoding='utf-8-sig', newline='') as cf:
             writer = csv.writer(cf); writer.writerow(fields)
@@ -269,6 +277,9 @@ class Archive:
             for row in self.db.execute("SELECT * FROM messages WHERE category IS NOT NULL AND status!='done' ORDER BY id"):
                 writer.writerow([csv_safe(row[k]) for k in fields])
         (self.root / 'errors.csv.tmp').replace(self.root / 'errors.csv')
+        checksums = ''.join(f'{row["sha256"]}  {row["path"]}\n' for row in self.db.execute(
+            "SELECT path,sha256 FROM messages WHERE status='done' AND sha256 IS NOT NULL ORDER BY id"))
+        atomic_text(self.root / 'SHA256SUMS', checksums)
         self._html_export()
         self._report()
 
@@ -345,6 +356,8 @@ EVENT_LABELS = {
     'history_retry':'Повтор чтения истории', 'gap_batch_checked':'Проверены номера постов',
     'gap_recovered':'Найден пропущенный пост', 'gap_check_failed':'Не удалось проверить номера',
     'gaps_completed':'Проверка номеров завершена', 'message_unavailable':'Пост недоступен',
+    'checksum_created':'Создана контрольная сумма', 'checksum_mismatch':'Обнаружено изменение файла',
+    'retry_requested':'Повтор проблемных вложений',
     'local_file_requeued':'Файл возвращён в очередь', 'local_files_checked':'Проверены локальные файлы',
     'download_attempt':'Попытка скачивания', 'file_started':'Начато скачивание файла',
     'file_completed':'Файл сохранён', 'download_error':'Ошибка скачивания',

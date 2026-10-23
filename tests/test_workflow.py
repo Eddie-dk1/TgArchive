@@ -231,7 +231,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.downloads,[])
         self.assertEqual(media.read_bytes(),payload)
         self.assertEqual(self.rows()[0]['expected_size'],len(payload))
-        self.assertEqual(self.metadata()['schema_version'],2)
+        self.assertEqual(self.metadata()['schema_version'],3)
         self.assertEqual(len(client.history_calls),1)
 
     async def test_progress_reports_whole_snapshot_and_exact_bytes(self):

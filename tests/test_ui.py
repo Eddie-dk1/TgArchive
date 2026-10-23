@@ -1,10 +1,11 @@
 """Native integration checks; opt in with TG_ARCHIVE_GUI_TESTS=1 on a desktop."""
 import os
+import asyncio
 import tempfile
 import tkinter as tk
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from telegram_archive.gui import App
 
@@ -109,6 +110,40 @@ class NativeInterfaceTests(unittest.TestCase):
         self.assertFalse(self.app.file_line.winfo_ismapped())
         self.app._summary(summary('cancelled'))
         self.assertIn('можно продолжить', self.app.phase_text.get())
+
+    def test_problem_window_retries_the_archive_owner_without_current_channel_selection(self):
+        from test_archive import FakeClient, channel, message
+        from telegram_archive.core import export_channel
+        client = FakeClient([message(1,payload=b'video')],{10:b'video'})
+        client.fail.add(10)
+        with patch('telegram_archive.core.asyncio.sleep', new=AsyncMock()):
+            folder = asyncio.run(export_channel(client,channel(),self.private,lambda *_:None))
+        self.app.archive_path = folder
+        self.app._show_issues()
+        self.app.update()
+        self.assertEqual(self.app.issues_data['retryable'],1)
+        self.assertEqual(self.app.issues_tree.get_children(),('1',))
+        self.assertFalse(self.app.retry_button.instate(['disabled']))
+        self.assert_controls_fit()
+        with patch.object(self.app,'_start') as start:
+            self.app._retry_issues()
+        self.assertEqual(start.call_args.args,('retry',))
+        self.assertEqual(start.call_args.kwargs['selected']['account_id'],9)
+        self.assertEqual(start.call_args.kwargs['output'],str(folder.parent))
+        self.app._busy(True)
+        self.assertTrue(self.app.retry_button.instate(['disabled']))
+
+    def test_problem_window_shows_success_without_an_enabled_retry(self):
+        from test_archive import FakeClient, channel, message
+        from telegram_archive.core import export_channel
+        folder=asyncio.run(export_channel(FakeClient([message(1,payload=b'x')],{10:b'x'}),
+                                         channel(),self.private,lambda *_:None))
+        self.app.archive_path=folder
+        self.app._show_issues()
+        self.app.update()
+        self.assertEqual(self.app.issue_detail.get(),'Все файлы сохранены.')
+        self.assertTrue(self.app.retry_button.instate(['disabled']))
+        self.assertEqual(self.app.issues_tree.get_children(),())
 
 
 if __name__ == '__main__':
