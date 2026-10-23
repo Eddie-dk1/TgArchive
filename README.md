@@ -15,7 +15,7 @@ Built with Python, Tkinter, Telethon, and SQLite. The interface is currently in 
 - Track messages, files, errors, transferred bytes, speed, and estimated time remaining.
 - Detect changed or corrupted local files with SHA-256 and restore them on resume.
 - View unfinished attachments in the app and retry failures without scanning history again.
-- Build a standalone macOS `.app` with an icon; CI produces Apple Silicon and Intel artifacts.
+- Build a standalone macOS `.app` with an icon; CI produces an Apple Silicon artifact.
 - Browse saved messages in HTML; use JSONL, CSV, and SQLite for further processing.
 - Inspect persistent run logs, failed downloads, and gaps in message IDs.
 
@@ -29,7 +29,7 @@ The development environment was tested on Apple Silicon with Python 3.14.3 and T
 
 ## Standalone macOS app
 
-The [GitHub Actions workflow](https://github.com/Eddie-dk1/TgArchive/actions/workflows/macos.yml) tests and builds the app for **Apple Silicon (`arm64`)** and **Intel (`x86_64`)**. Open a successful workflow run and download the artifact for your Mac. Extract the artifact, then its inner ZIP, and move `Telegram Archive.app` to Applications or another writable location. Python does not need to be installed to run the bundle.
+The [GitHub Actions workflow](https://github.com/Eddie-dk1/TgArchive/actions/workflows/macos.yml) tests and builds the app for **Apple Silicon (`arm64`)**. Open a successful workflow run and download the Apple Silicon artifact. Extract the artifact, then its inner ZIP, and move `Telegram Archive.app` to Applications or another writable location. Python does not need to be installed to run the bundle.
 
 The app is ad-hoc signed, not Apple-notarized. macOS may require explicit approval to open it. Developer ID signing and notarization require Apple developer credentials and are not configured in this repository.
 
@@ -196,7 +196,7 @@ Project modules:
 
 ## Build the macOS app
 
-Use a macOS Python installation with bundled Tcl/Tk (the python.org installer is used by CI). Build on the architecture you want to distribute:
+Use a macOS Python installation with bundled Tcl/Tk (the python.org installer is used by CI). Build on an Apple Silicon Mac (`arm64`):
 
 ```sh
 .venv/bin/python -m pip install -r requirements-build.txt
@@ -204,9 +204,9 @@ Use a macOS Python installation with bundled Tcl/Tk (the python.org installer is
 .venv/bin/python tools/smoke_macos.py
 ```
 
-Outputs are `dist/Telegram Archive.app`, an architecture-specific ZIP, and its checksum. The build explicitly collects application dependencies and the license, excludes account data, verifies the bundle signature, and checks for unexpected runtime files before creating the ZIP. The smoke check creates a temporary profile, imports Desktop and SOCKS5 support, opens the UI, renders a QR code, and exercises the problem-file window without network access or a real account.
+Outputs are `dist/Telegram Archive.app`, an Apple Silicon ZIP, and its checksum. The build explicitly collects application dependencies and the license, excludes account data, verifies the bundle signature, and checks for unexpected runtime files before creating the ZIP. The smoke check creates a temporary profile, imports Desktop and SOCKS5 support, opens the UI, renders a QR code, and exercises the problem-file window without network access or a real account.
 
-The workflow runs on pushes to `main`, pull requests, and manual dispatch. Both architecture jobs run engine and native UI tests, build the app, execute the bundle smoke check, and upload ZIPs with checksums. Artifacts are retained for 30 days. Build products, local smoke data, and account profiles are not committed.
+The workflow runs on pushes to `main`, pull requests, and manual dispatch. The Apple Silicon job runs engine and native UI tests, builds the app, executes the bundle smoke check, and uploads the ZIP with its checksum. Artifacts are retained for 30 days. Build products, local smoke data, and account profiles are not committed.
 
 ## Credits and license
 

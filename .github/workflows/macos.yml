@@ -10,16 +10,8 @@ permissions:
   contents: read
 
 jobs:
-  macos:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15
-            architecture: arm64
-          - runner: macos-15-intel
-            architecture: x86_64
-    runs-on: ${{ matrix.runner }}
+  macos-arm64:
+    runs-on: macos-15
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
@@ -45,9 +37,9 @@ jobs:
       - name: Upload app and checksum
         uses: actions/upload-artifact@v7
         with:
-          name: Telegram-Archive-macOS-${{ matrix.architecture }}
+          name: Telegram-Archive-macOS-arm64
           path: |
-            dist/Telegram-Archive-macOS-${{ matrix.architecture }}.zip
-            dist/Telegram-Archive-macOS-${{ matrix.architecture }}.zip.sha256
+            dist/Telegram-Archive-macOS-arm64.zip
+            dist/Telegram-Archive-macOS-arm64.zip.sha256
           if-no-files-found: error
           retention-days: 30

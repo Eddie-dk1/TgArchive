@@ -10,8 +10,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def main():
-    if sys.platform != 'darwin':
-        raise SystemExit('Build the macOS app on a Mac.')
+    if sys.platform != 'darwin' or platform.machine() != 'arm64':
+        raise SystemExit('Build this app on an Apple Silicon Mac (arm64).')
     import tkinter
     from build_icon import build_icon
     build_icon()
