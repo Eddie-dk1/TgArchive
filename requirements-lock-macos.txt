@@ -1,0 +1,12 @@
+# Verified on this Mac: Apple Silicon, Python 3.14.3, 2026-10-22.
+# cryptg is an optional accelerator; requirements.txt is the portable baseline.
+Telethon==1.45.0
+cryptg==0.6.0
+pyaes==1.6.1
+pyasn1==0.6.4
+python-socks[asyncio]==2.8.2
+rsa==4.9.1
+qrcode==8.2
+opentele2==1.2.1
+selectolax==1.0.2
+tgcrypto-pyrofork==1.2.8

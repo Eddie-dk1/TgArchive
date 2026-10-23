@@ -1,0 +1,168 @@
+# Telegram Archive
+
+A local macOS app for archiving Telegram channels and groups you belong to. Save messages, photos, videos, and other attachments to a folder of your choice, then browse the archive offline.
+
+Built with Python, Tkinter, Telethon, and SQLite. The interface is currently in Russian and uses a compact, dark blue theme. No bot, Docker, or external server is required.
+
+## Features
+
+- Choose public or private channels and groups from your account.
+- Connect using an existing Telegram Desktop account, or sign in separately with a QR code or phone number.
+- Choose an output folder before every export.
+- Collect message history and save a durable media queue **before downloading attachments**.
+- Stop and resume interrupted exports, including partially downloaded files.
+- Run a full history check to collect new posts and update existing messages.
+- Track messages, files, errors, transferred bytes, speed, and estimated time remaining.
+- Browse saved messages in HTML; use JSONL, CSV, and SQLite for further processing.
+- Inspect persistent run logs, failed downloads, and gaps in message IDs.
+
+## Requirements
+
+- macOS with Python **3.11 or newer**, including Tkinter. The installer from [python.org](https://www.python.org/downloads/macos/) includes Tkinter.
+- A Telegram account with access to the channel or group you want to archive.
+- An internet connection and enough free disk space for the export.
+
+The development environment was tested on Apple Silicon with Python 3.14.3 and Tk 8.6. Other environments may need additional dependency setup. Windows and Linux are not currently supported by the launcher or Desktop session discovery.
+
+## Quick start
+
+```sh
+git clone https://github.com/Eddie-dk1/TgArchive.git
+cd TgArchive
+./archive.command
+```
+
+You can also double-click `archive.command` in Finder. On its first run, the launcher creates a local `.venv` and installs the dependencies from `requirements.txt`.
+
+If you prefer to set up the environment yourself:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m telegram_archive
+```
+
+`requirements-lock-macos.txt` records the exact versions used in the tested macOS environment, including optional accelerators. `requirements.txt` is the baseline installation.
+
+## Connect your account
+
+### Existing Telegram Desktop account
+
+Click **Подключить Telegram Desktop** (Connect Telegram Desktop). The app looks for a local `tdata` directory; you can select it manually if needed. No phone number, API ID, or API hash is required for this method.
+
+If Desktop has several accounts, choose one in the account dialog. If it has a local passcode, enter it when prompted. The current import library supports ASCII passcodes; use QR sign-in if your passcode is incompatible.
+
+Importing uses opentele2's `UseCurrentSession` mode. It reads the existing Desktop authorization and stores a local copy for Archive. **The source `tdata` files are not modified.** This applies to Telegram Desktop, not the separate native Swift Telegram app for macOS.
+
+**The imported authorization is shared with Desktop.** Revoking that session through Telegram's Devices settings also disconnects Desktop. Closing Archive does not revoke anything. The app's **Выйти из Archive** (Sign out of Archive) action removes Archive's local authorization files without calling Telegram's server-side logout, so Desktop remains signed in.
+
+### Independent QR or phone sign-in
+
+1. Open **Подключение** (Connection).
+2. Choose QR code or phone sign-in.
+3. Enter your own API ID and API hash from [my.telegram.org/apps](https://my.telegram.org/apps).
+4. Click **Подключить** (Connect).
+5. For QR sign-in, open Telegram on your phone → Settings → Devices → Link Desktop Device and scan the code. For phone sign-in, enter the login code when asked.
+
+Two-step verification passwords are requested when needed. QR codes refresh automatically when they expire. The session and connection settings are saved locally, so subsequent launches do not require signing in again unless the session has been revoked.
+
+This method creates an authorization separate from Telegram Desktop.
+
+## Export a channel
+
+1. Connect and wait for the channel list.
+2. Select a channel or group. Search works by name or chat ID.
+3. Choose an export mode.
+4. Click **Выбрать папку и начать** (Choose folder and start).
+5. Select the parent folder where the channel archive should be stored.
+
+The app creates a `channel_<chat_id>` subfolder. Renaming a Telegram channel does not create another archive.
+
+| Mode | Behavior |
+| --- | --- |
+| **Продолжить загрузку** — Resume | For a new archive, collects all accessible history. For an existing archive, resumes an interrupted history scan or the saved download queue, checks existing files, and retries pending or failed downloads. Does not look for new posts after the saved history scan is complete. |
+| **Полная сверка** — Full check | Scans the history again, collects new posts, updates message content, checks previously saved posts, and refreshes the download queue. Reuses files whose expected size matches. |
+
+To resume an export, choose the same channel and the **same parent folder** as before. For example, if the archive is `Downloads/Telegram/channel_<chat_id>`, select `Downloads/Telegram`, not the channel subfolder.
+
+### Download order and stopping
+
+A scan captures an upper message ID, then collects accessible posts **from oldest to newest**. Messages created after that boundary are included in the next full check. The oldest accessible post may differ from the channel's first post if older history is hidden from your account.
+
+After collecting history, the app writes HTML, JSONL, and CSV exports, checks message-ID gaps and local files, then downloads the media queue. Photos use the largest available size; videos and documents are saved without transcoding.
+
+**Остановить** (Stop) preserves the queue and export state. Partial files resume at a 512 KiB block boundary; an incomplete final block may be downloaded again. Telegram rate-limit waits are displayed and can be cancelled. Ordinary download failures are retried up to three times per run.
+
+Closing the window during an active export requests a stop and saves the archive before exiting.
+
+## Archive contents
+
+```text
+channel_<chat_id>/
+├── index.html          Offline message viewer
+├── page_2.html         Additional pages for large archives
+├── messages.jsonl      Messages, metadata, and raw Telegram structures
+├── messages.csv        Spreadsheet-friendly message export
+├── report.html         Run summary, errors, and recent events
+├── journal.jsonl       Persistent run and retry history
+├── errors.csv          Attachments that could not be saved
+├── gaps.csv            Checked and unverified message-ID gaps
+├── channel.json        Snapshot boundary, queue state, and counters
+├── archive.sqlite3     Durable state for resume and updates
+└── media/
+    ├── photos/
+    ├── videos/
+    ├── audio/
+    ├── documents/
+    └── stickers_gifs/
+```
+
+The HTML viewer shows plain message text and attachments, with up to 500 messages per page. Additional Telegram fields, such as album grouping, entities, and reply metadata, remain available in JSONL and SQLite. CSV exports escape potential spreadsheet formulas; JSONL and SQLite preserve the original text.
+
+Use **Открыть архив** (Open archive) to view saved posts, **Отчёт об ошибках** (Error report) for export issues, or **Журнал** (Log) for application events.
+
+## Local account data
+
+Connection settings and authorization files are stored in `.private/` beside the app. Directory permissions are set to `700` and files to `600`. API hashes and proxy passwords are stored locally in the settings file; login codes, two-step verification passwords, and Desktop passcodes are not saved by the app.
+
+Telegram session files grant account access. Keep `.private/` private. The repository excludes it, virtual environments, downloaded archives, databases, logs, and local development notes through `.gitignore`.
+
+Exports stay in the folder you choose. If that folder is synced with iCloud or another service, its existing sync settings apply.
+
+## Limitations
+
+- Only history and files accessible to the signed-in account can be archived. Previously deleted messages, hidden history, and inaccessible attachments cannot be recovered.
+- Channels with Telegram's content-protection flag are not automatically excluded. The app uses the API rather than Desktop's export or forwarding features; actual file availability depends on Telegram's server-side permissions. Failed attachments are recorded instead of being silently treated as downloaded.
+- Gaps in message IDs do not necessarily mean lost messages. Up to 1,000 missing IDs are checked per scan; other gaps remain explicitly unverified.
+- Comments in a linked discussion group are a separate chat. Select that group separately if your account has access.
+- Albums retain their message records and shared `grouped_id`; the HTML viewer does not combine them into an album layout.
+- File validation checks existence and expected size, not cryptographic checksums. Corruption that preserves file size may go undetected.
+- Browser video playback depends on codec support. Open the saved file in a compatible player when necessary.
+- SOCKS5 proxies are supported in Connection settings. Telegram MTProxy links are not supported.
+
+## Development and tests
+
+```sh
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+The automated suite covers archive collection, resume, cancellation, retries, migration, gap handling, progress events, QR authentication, local-only sign-out, and Desktop session conversion. Tests use synthetic data and mocked Telegram clients; they do not require a real account or network access.
+
+Four native interface checks are opt-in and require a macOS desktop session:
+
+```sh
+TG_ARCHIVE_GUI_TESTS=1 .venv/bin/python -m unittest discover -s tests -p test_ui.py -v
+```
+
+Project modules:
+
+- `gui.py`, `ui.py`: native interface, styles, and progress display.
+- `auth.py`, `desktop.py`: QR/phone authentication and local Desktop session import.
+- `core.py`: history collection, media queue, retries, and gap verification.
+- `storage.py`, `common.py`: SQLite state, exports, and shared helpers.
+
+## Credits and license
+
+Originally adapted from [zsv555/telegram-media-downloader](https://github.com/zsv555/telegram-media-downloader). The interface and archive engine were substantially reworked around SQLite, a separate history-collection phase, and a persistent media queue. The upstream MIT license notice is preserved in [LICENSE](LICENSE).
+
+Built with [Telethon](https://docs.telethon.dev/), [opentele2](https://opentele2.github.io/), and Python's standard Tkinter and SQLite libraries.

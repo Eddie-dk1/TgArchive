@@ -1,0 +1,57 @@
+# Local authorization and credentials
+.private/
+**/tdata/
+*.session*
+.env
+.env.*
+!.env.example
+settings.json
+desktop_connection.json
+*.pem
+*.key
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Downloaded archives, temporary downloads, and runtime logs
+channel_*/
+media/
+*.sqlite3*
+*.db
+*.db-*
+*.part
+*.jsonl
+*.log
+messages.csv
+errors.csv
+gaps.csv
+channel.json
+report.html
+
+# Local development notes, audit reports, and scratch files
+/docs/
+/work/
+/outputs/
+/backups/
+*.bak
+*.tmp
+
+# Build output, editors, and macOS metadata
+build/
+dist/
+.idea/
+.vscode/
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
