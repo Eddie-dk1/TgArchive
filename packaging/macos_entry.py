@@ -45,8 +45,43 @@ def smoke_test():
         app.update()
         assert app.issues_data['retryable'] == 1
         assert not app.retry_button.instate(['disabled'])
+        stage('Mini App HTTP and SOCKS imports')
+        import asyncio
+        import httpx
+        from types import SimpleNamespace
+        from telegram_archive.miniapps import Asset, Catalogue, Node, identity
+        from telegram_archive.miniapps.archive import archive
+        from telegram_archive.miniapps.edify import tls_context
+        async def mini_smoke():
+            async with httpx.AsyncClient(verify=tls_context(),proxy='socks5://127.0.0.1:1'):
+                pass
+            async def catalogue():
+                return Catalogue([Node('course:smoke','','course','Offline course'),
+                    Node('lesson:smoke','course:smoke','lesson','Offline lesson',text='Saved text')],
+                    [Asset('lesson:smoke','photo:0','sample.jpg','photo',{},identity('smoke'),4)])
+            async def resolve(asset):
+                return 'https://example.org/photo'
+            class Bytes(httpx.AsyncByteStream):
+                async def __aiter__(self):
+                    yield b'test'
+            async with httpx.AsyncClient(transport=httpx.MockTransport(
+                    lambda request:httpx.Response(200,stream=Bytes(),headers={'content-type':'image/jpeg'}))) as http:
+                provider=SimpleNamespace(source='edify',account_id=123,bot_id=456,http=http,
+                                         catalogue=catalogue,resolve=resolve)
+                return await archive(provider,gui.PRIVATE/'mini-smoke')
+        report=asyncio.run(mini_smoke())
+        assert report['counts']['done']==1
+        stage('Mini App source and report UI')
+        app.connected=True
+        app.current_account_id=123
+        app.source_mode.set('Мини-приложения')
+        app._source_changed()
+        app.archive_path=report['root']
+        app._show_mini_report()
+        app.update()
         result = dict(ok=True, version=__version__, tk=app.tk.call('info','patchlevel'),
-                      checks=['Tk window','QR rendering','Desktop import modules','SOCKS5 modules','issue window'])
+                      checks=['Tk window','QR rendering','Desktop import modules','SOCKS5 modules','issue window',
+                              'Mini App HTTP/SOCKS/TLS','offline Mini App download','Mini App UI'])
         if '--smoke-result' in sys.argv:
             path = Path(sys.argv[sys.argv.index('--smoke-result')+1])
             path.write_text(json.dumps(result, indent=2))

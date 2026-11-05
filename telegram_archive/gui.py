@@ -22,6 +22,8 @@ from . import __version__
 from .ui import configure_theme, panel, archive_mark, Progress, FONT, BG, SURFACE, INK, MUTED, LINE, PALE
 from .auth import authorize_qr, session_key, forget_local_account
 from .desktop import find_tdata, connection_info, saved_client, import_desktop
+from .miniapps.archive import export_edify
+from .miniapps import MiniAppError
 
 BASE = Path(__file__).resolve().parent.parent
 PRIVATE = private_directory(BASE)
@@ -45,6 +47,10 @@ class App(tk.Tk):
         self.cancel_requested = threading.Event()
         self.dialogs = []
         self.visible_dialogs = []
+        self.source_mode = tk.StringVar(value='Каналы и группы')
+        self.channel_dialogs = []
+        self.current_account_id = None
+        self.mini_nodes = []
         self.archive_path = None
         self.issues_window = None
         self.issues_data = None
@@ -138,7 +144,10 @@ class App(tk.Tk):
         left.rowconfigure(3, weight=1)
         toolbar = self.channel_toolbar = ttk.Frame(left, style='Card.TFrame')
         toolbar.grid(row=0, column=0, sticky='ew')
-        ttk.Label(toolbar, text='Каналы и группы', style='Section.TLabel').pack(side='left')
+        self.source_box = ttk.Combobox(toolbar, textvariable=self.source_mode,
+            values=['Каналы и группы', 'Мини-приложения'], state='readonly', width=19)
+        self.source_box.pack(side='left')
+        self.source_box.bind('<<ComboboxSelected>>', self._source_changed)
         ttk.Label(toolbar, textvariable=self.channel_count, style='CardMuted.TLabel').pack(side='left', padx=8)
         self.load_button = ttk.Button(toolbar, text='Обновить', command=self.load_channels, padding=(10, 6), state='disabled')
         self.load_button.pack(side='right')
@@ -203,7 +212,10 @@ class App(tk.Tk):
             group = ttk.Frame(status, style='Card.TFrame')
             group.grid(row=1, column=i, sticky='w', pady=(8, 8))
             ttk.Label(group, textvariable=self.metric_values[i], style='Value.TLabel').pack(anchor='w')
-            ttk.Label(group, text=text, style='CardMuted.TLabel').pack(anchor='w', pady=(2, 0))
+            caption = ttk.Label(group, text=text, style='CardMuted.TLabel')
+            caption.pack(anchor='w', pady=(2, 0))
+            if i == 0:
+                self.item_caption = caption
         ttk.Label(status, textvariable=self.percent_text, style='Value.TLabel').grid(row=1, column=3, sticky='e')
         self.progress = Progress(status)
         self.progress.grid(row=2, column=0, columnspan=4, sticky='ew')
@@ -233,19 +245,26 @@ class App(tk.Tk):
         return 'break'
 
     def _mode_changed(self):
-        if self.export_mode.get() == 'Полная сверка':
+        if self.source_mode.get() == 'Мини-приложения':
+            self.mode_hint.set('Обновит каталог, сохранит тексты, фото и видео. Открывшиеся разделы добавит при повторном запуске.')
+        elif self.export_mode.get() == 'Полная сверка':
             self.mode_hint.set('Проверит всю историю и обновит посты. Скачанные файлы использует повторно.')
         else:
             self.mode_hint.set('Новый архив — вся история. Существующий — продолжение загрузки файлов.')
 
     def _selection_changed(self, _event=None):
         selection = self.tree.selection()
+        if selection and self.source_mode.get() == 'Мини-приложения':
+            selection = ('edify',)
         selected = next((d for d in self.visible_dialogs if selection and str(d['id']) == selection[0]), None)
         if selected:
             self.selected_title.set(selected['title'][:49] + ('…' if len(selected['title']) > 49 else ''))
-            access = 'Открытый' if selected['public'] else 'Приватный'
-            self.selected_detail.set(f'{access} · ID {selected["id"]}' +
-                                     ('\nВключена защита контента' if selected['protected'] else ''))
+            if selected.get('source') == 'edify':
+                self.selected_detail.set('Весь доступный каталог аккаунта.\nВидео, фотографии, тексты и вложения.\nПрогресс обучения не меняется.')
+            else:
+                access = 'Открытый' if selected['public'] else 'Приватный'
+                self.selected_detail.set(f'{access} · ID {selected["id"]}' +
+                                         ('\nВключена защита контента' if selected['protected'] else ''))
         else:
             self.selected_title.set('Выберите канал')
             self.selected_detail.set('Нажмите на канал в списке слева.')
@@ -368,6 +387,9 @@ class App(tk.Tk):
             self.login_method.set(config.get('login_method', 'QR-код'))
             self.export_mode.set(config.get('export_mode', 'Продолжить загрузку'))
             self.auto_connect = bool(config.get('auto_connect', True))
+            if config.get('source_mode') == 'Мини-приложения':
+                self.source_mode.set('Мини-приложения')
+                self._source_changed()
         except (ValueError, OSError):
             self._log('Настройки не удалось прочитать. Введите их заново.')
 
@@ -376,6 +398,7 @@ class App(tk.Tk):
         config['proxy_password'] = self.fields['proxy_password'].get()
         config['login_method'] = self.login_method.get()
         config['export_mode'] = self.export_mode.get()
+        config['source_mode'] = self.source_mode.get()
         desktop_mode = config['login_method'] == 'Telegram Desktop'
         if desktop_mode and not importing_desktop and not connection_info(PRIVATE):
             raise ValueError('Сначала нажмите «Подключить Telegram Desktop».')
@@ -402,7 +425,8 @@ class App(tk.Tk):
             button.configure(state='disabled' if busy else 'normal')
         self.load_button.configure(state='normal' if self.connected and not busy else 'disabled')
         self.stop_button.configure(state='normal' if busy else 'disabled')
-        self.mode_box.configure(state='disabled' if busy else 'readonly')
+        self.source_box.configure(state='disabled' if busy else 'readonly')
+        self.mode_box.configure(state='disabled' if busy or self.source_mode.get() == 'Мини-приложения' else 'readonly')
         self._issue_actions()
         self._selection_changed()
 
@@ -456,7 +480,16 @@ class App(tk.Tk):
             self.emit('account', (me.first_name or 'Telegram', me.id))
             if selected and selected['account_id'] != me.id:
                 raise ValueError('Аккаунт изменён. Сначала обновите список каналов.')
-            if action in ('list', 'desktop'):
+            if action == 'mini_export':
+                from urllib.parse import quote
+                proxy = None
+                if config['proxy_host']:
+                    auth = quote(config['proxy_user'], safe='') + ':' + quote(config['proxy_password'], safe='') + '@' if config['proxy_user'] else ''
+                    proxy = f'socks5://{auth}{config["proxy_host"]}:{config["proxy_port"]}'
+                await export_edify(client, output, self.emit, proxy=proxy)
+            elif action in ('list', 'desktop') and config['source_mode'] == 'Мини-приложения':
+                self.emit('status', 'Выберите Edify и папку для всего доступного каталога.')
+            elif action in ('list', 'desktop'):
                 self.emit('status', 'Читаю список ваших каналов и групп…')
                 dialogs = []
                 async for dialog in client.iter_dialogs():
@@ -494,11 +527,11 @@ class App(tk.Tk):
             return
         self.current_action = action
         self._busy(True)
-        self.phase_text.set('Подключение' if action not in ('export','retry') else 'Подготовка')
+        self.phase_text.set('Подготовка' if action in ('export','retry','mini_export') else 'Подключение')
         self.phase_badge.configure(style='Badge.TLabel')
         self.progress_text.set('Подключение к Telegram…')
         self.percent_text.set('0%')
-        if action in ('export', 'retry'):
+        if action in ('export', 'retry', 'mini_export'):
             for value in self.metric_values:
                 value.set('—')
         self.cancel_requested.clear()
@@ -525,6 +558,8 @@ class App(tk.Tk):
                     message = f'Telegram просит подождать {exc.seconds} с. Повторите действие позже.'
                 elif isinstance(exc, (errors.PhoneCodeInvalidError, errors.PhoneCodeExpiredError)):
                     message = 'Код неверный или истёк. Повторите вход.'
+                elif isinstance(exc, MiniAppError):
+                    message = str(exc)
                 elif isinstance(exc, (ConnectionError, OSError, asyncio.TimeoutError)):
                     message = f'Проверьте сеть, VPN / SOCKS5 и доступность папки. {type(exc).__name__}: {exc}'
                 else:
@@ -543,6 +578,26 @@ class App(tk.Tk):
         self.autoload_id = None
         self._start('list')
 
+    def _source_changed(self, _event=None):
+        mini = self.source_mode.get() == 'Мини-приложения'
+        if mini:
+            self.dialogs = ([dict(id='edify', title='Edify · весь каталог', source='edify',
+                                  account_id=self.current_account_id)] if self.connected else [])
+        else:
+            self.dialogs = list(self.channel_dialogs)
+        self.tree.heading('#0', text='Мини-приложение' if mini else 'Канал / группа')
+        self.tree.heading('kind', text='Источник' if mini else 'Доступ')
+        self.item_caption.configure(text='Уроков' if mini else 'Сообщений')
+        self.export_button.configure(text='Обновить и докачать' if mini else 'Выбрать папку и начать')
+        self.steps[1].configure(text='02   Выберите источник' if mini else '02   Выберите канал')
+        self.mode_box.configure(state='disabled' if mini or self.is_busy else 'readonly')
+        self.search.set('')
+        self._filter()
+        self._mode_changed()
+        if mini and self.dialogs:
+            self.tree.selection_set('edify')
+            self._selection_changed()
+
     def forget_account(self):
         if self.worker and self.worker.is_alive():
             messagebox.showinfo('Остановите загрузку', 'Дождитесь завершения или остановите загрузку перед выходом.', parent=self)
@@ -560,7 +615,10 @@ class App(tk.Tk):
         self.fields['phone'].set('')
         self.login_method.set('QR-код')
         self.dialogs = []
+        self.channel_dialogs = []
+        self.current_account_id = None
         self.connected = False
+        self.mini_nodes = []
         self.account_badge.configure(text='Не подключён', style='IdleBadge.TLabel')
         self.phase_text.set('Готов к работе')
         self.percent_text.set('0%')
@@ -600,10 +658,12 @@ class App(tk.Tk):
         if not selection:
             messagebox.showinfo('Выберите канал', 'Загрузите список каналов и выберите один.', parent=self)
             return
-        selected = next(d for d in self.visible_dialogs if str(d['id']) == selection[0])
-        output = filedialog.askdirectory(parent=self, title='Папка для архива канала', mustexist=True)
+        selected = next(d for d in self.visible_dialogs if str(d['id']) ==
+                        ('edify' if self.source_mode.get() == 'Мини-приложения' else selection[0]))
+        mini = selected.get('source') == 'edify'
+        output = filedialog.askdirectory(parent=self, title='Папка для архива Edify' if mini else 'Папка для архива канала', mustexist=True)
         if output:
-            self._start('export', selected, output)
+            self._start('mini_export' if mini else 'export', selected, output)
 
     def stop(self):
         self.cancel_requested.set()
@@ -660,8 +720,17 @@ class App(tk.Tk):
         self.visible_dialogs = [d for d in self.dialogs if query in d['title'].casefold() or query in str(d['id'])]
         self.tree.delete(*self.tree.get_children())
         for d in self.visible_dialogs:
-            access = 'Открытый' if d['public'] else 'Приватный'
+            access = 'Mini App' if d.get('source') else 'Открытый' if d['public'] else 'Приватный'
             self.tree.insert('', 'end', iid=str(d['id']), text='  ' + d['title'], values=(access,))
+        if self.source_mode.get() == 'Мини-приложения' and self.tree.exists('edify'):
+            for node in self.mini_nodes:
+                parent = node['parent'] or 'edify'
+                if self.tree.exists(parent):
+                    state = {'available':'Доступно', 'pending':'Позже', 'unavailable':'Закрыто',
+                             'incomplete':'Не полностью'}.get(node['state'], '')
+                    self.tree.insert(parent, 'end', iid=node['id'], text=node['title'], values=(state,),
+                                     open=node['kind'] == 'course')
+            self.tree.item('edify', open=True)
         self.channel_count.set(f'{len(self.visible_dialogs)} / {len(self.dialogs)}' if query else str(len(self.dialogs)) if self.dialogs else '')
         if selection and self.tree.exists(selection[0]):
             self.tree.selection_set(selection[0])
@@ -709,7 +778,8 @@ class App(tk.Tk):
                 elif kind == 'status':
                     self.progress_text.set(value)
                 elif kind == 'dialogs':
-                    self.dialogs = sorted(value, key=lambda d: d['title'].casefold())
+                    self.channel_dialogs = sorted(value, key=lambda d: d['title'].casefold())
+                    self.dialogs = list(self.channel_dialogs)
                     self._filter()
                 elif kind == 'qr':
                     self._show_qr(value)
@@ -718,13 +788,24 @@ class App(tk.Tk):
                 elif kind == 'account':
                     name, uid = value
                     self.connected = True
+                    if self.current_account_id != uid:
+                        self.mini_nodes = []
+                        self.channel_dialogs = []
+                    self.current_account_id = uid
                     self.account_badge.configure(text=name, style='Badge.TLabel')
                     self.account_text.set(f'ID {uid} · вход сохранён')
                     self.load_button.configure(text='Обновить')
+                    if self.source_mode.get() == 'Мини-приложения':
+                        self._source_changed()
                     if self.settings_visible:
                         self._toggle_settings()
                 elif kind == 'summary':
                     self._summary(value)
+                elif kind == 'mini_summary':
+                    self._mini_summary(value)
+                elif kind == 'mini_catalogue':
+                    self.mini_nodes = value
+                    self._filter()
                 elif kind == 'progress':
                     mid, received, total = value
                     self.file_progress['value'] = received * 100 / total if total else 0
@@ -754,7 +835,8 @@ class App(tk.Tk):
                     self._close_qr()
                     self._busy(False)
                     if self.current_action in ('list', 'desktop') and self.phase_text.get() != 'Не завершено':
-                        self.phase_text.set('Выберите канал' if self.connected else 'Остановлено')
+                        self.phase_text.set(('Выберите источник' if self.source_mode.get() == 'Мини-приложения'
+                                             else 'Выберите канал') if self.connected else 'Остановлено')
                     self.current_action = None
                     if self.closing:
                         self.destroy()
@@ -804,7 +886,58 @@ class App(tk.Tk):
             self.file_text.set('Текущий файл: —')
             self.file_progress['value'] = 0
 
+    def _mini_summary(self, data):
+        total = data['total_bytes']
+        percentage = (data['done_bytes'] + data['active_bytes']) * 100 / total if total else 0
+        if data.get('unknown_sizes'):
+            percentage = data['files_done'] * 100 / data['files_total'] if data['files_total'] else 0
+        if data['files_done'] < data['files_total'] or not data.get('complete', True):
+            percentage = min(99, percentage)
+        self.progress['value'] = min(100, percentage)
+        self.metric_values[0].set(str(data['lessons']))
+        self.metric_values[1].set(f'{data["files_done"]}/{data["files_total"]}')
+        self.metric_values[2].set(str(data['files_errors']))
+        self.percent_text.set(f'{self.progress["value"]:.0f}%')
+        phase = data['phase']
+        self.phase_text.set({'catalogue':'Читаем каталог', 'media':'Скачиваем и проверяем',
+            'finished':'Доступное сохранено', 'incomplete':'Есть недочёты',
+            'cancelled':'Остановлено · можно продолжить'}.get(phase, 'Подготовка'))
+        self.phase_badge.configure(style='ErrorBadge.TLabel' if phase == 'incomplete' else 'Badge.TLabel')
+        self.transfer_text.set(f'{format_bytes(data["done_bytes"])} / {format_bytes(total)} · '
+            f'{format_bytes(data["speed_bps"])}/с · Осталось: {format_duration(data.get("eta_seconds"))} · '
+            f'Разделов на будущее: {data["pending_modules"]}')
+        if phase == 'media':
+            self.file_line.grid()
+        else:
+            self.file_line.grid_remove()
+
+    def _show_mini_report(self):
+        try:
+            report = json.loads((self.archive_path / 'report.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            messagebox.showinfo('Edify', 'Каталог ещё собирается. Отчёт появится после чтения каталога.', parent=self)
+            return
+        window = tk.Toplevel(self, background=BG)
+        window.title('Edify · результат архивации')
+        window.geometry('700x440')
+        body = ttk.Frame(window, padding=20)
+        body.pack(fill='both', expand=True)
+        ttk.Label(body, text='Каталог Edify', style='Title.TLabel').pack(anchor='w')
+        ttk.Label(body, text=f'Сохранено файлов: {report["counts"]["done"]} · '
+            f'Разделов пока без материалов: {report["pending_modules"]}', style='Muted.TLabel').pack(anchor='w', pady=10)
+        details = tk.Text(body, wrap='word', background=SURFACE, foreground=INK,
+                          insertbackground=INK, relief='flat', font=(FONT, 12))
+        details.pack(fill='both', expand=True)
+        lines = list(report['warnings']) + [f'{p["filename"]}: {p["error"] or p["status"]}' for p in report['problems']]
+        details.insert('1.0', '\n\n'.join(lines) if lines else 'Все доступные сейчас материалы сохранены.\n'
+                       'Открывшиеся позже разделы будут добавлены при следующем обновлении.')
+        details.configure(state='disabled')
+        ttk.Button(body, text='Открыть офлайн-каталог', command=self.open_archive).pack(anchor='e', pady=(12,0))
+
     def _show_issues(self):
+        if self.archive_path and (self.archive_path / 'catalogue.sqlite3').is_file():
+            self._show_mini_report()
+            return
         if self.issues_window is not None and self.issues_window.winfo_exists():
             self._reload_issues(self.issues_data['offset'])
             self.issues_window.lift()

@@ -1,3 +1,3 @@
-"""Local Telegram channel archiver for macOS."""
+"""Local Telegram channel and Mini App archiver for macOS."""
 
-__version__ = '0.2.0'
+__version__ = '0.3.0'

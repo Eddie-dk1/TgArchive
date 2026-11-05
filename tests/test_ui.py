@@ -111,6 +111,36 @@ class NativeInterfaceTests(unittest.TestCase):
         self.app._summary(summary('cancelled'))
         self.assertIn('можно продолжить', self.app.phase_text.get())
 
+    def test_miniapp_switch_catalogue_selection_and_compact_progress(self):
+        self.populate()
+        self.app.channel_dialogs = list(self.app.dialogs)
+        self.app.current_account_id = 123
+        self.app.source_mode.set('Мини-приложения')
+        self.app._source_changed()
+        self.assertEqual(self.app.tree.selection(),('edify',))
+        self.assertEqual(self.app.export_button.cget('text'),'Обновить и докачать')
+        self.app.mini_nodes = [dict(id='course:c',parent='',kind='course',title='Course',state='available'),
+            dict(id='module:m',parent='course:c',kind='module',title='Module',state='pending')]
+        self.app._filter()
+        self.app.tree.selection_set('module:m')
+        self.app._selection_changed()
+        self.assertFalse(self.app.export_button.instate(['disabled']))
+        with patch('telegram_archive.gui.filedialog.askdirectory',return_value=str(self.private)),patch.object(self.app,'_start') as start:
+            self.app.export()
+        self.assertEqual(start.call_args.args[0],'mini_export')
+        self.app._mini_summary(dict(phase='media',total_bytes=597123625,done_bytes=170428620,active_bytes=1024,
+            lessons=3,files_done=1,files_total=3,files_errors=0,speed_bps=1000000,pending_modules=8))
+        self.app.geometry('880x690')
+        self.app.update()
+        self.assert_controls_fit()
+        self.app._mini_summary(dict(phase='media',total_bytes=100,done_bytes=100,active_bytes=0,
+            lessons=3,files_done=3,files_total=4,files_errors=0,speed_bps=100,pending_modules=8,
+            unknown_sizes=True,eta_seconds=None))
+        self.assertEqual(self.app.progress['value'],75)
+        self.app.source_mode.set('Каналы и группы')
+        self.app._source_changed()
+        self.assertTrue(self.app.tree.exists('-100123'))
+
     def test_problem_window_retries_the_archive_owner_without_current_channel_selection(self):
         from test_archive import FakeClient, channel, message
         from telegram_archive.core import export_channel

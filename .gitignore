@@ -25,6 +25,7 @@ htmlcov/
 
 # Downloaded archives, temporary downloads, and runtime logs
 channel_*/
+miniapp_*/
 media/
 *.sqlite3*
 *.db

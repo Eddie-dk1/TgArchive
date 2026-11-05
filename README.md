@@ -1,8 +1,8 @@
 # Telegram Archive
 
-A local macOS app for archiving Telegram channels and groups you belong to. Save messages, photos, videos, and other attachments to a folder of your choice, then browse the archive offline.
+A local macOS app for archiving Telegram channels, groups, and supported Mini Apps. Save messages, lesson texts, photos, videos, and other attachments to a folder of your choice, then browse the archive offline.
 
-Built with Python, Tkinter, Telethon, and SQLite. The interface is currently in Russian and uses a compact, dark blue theme. No bot, Docker, or external server is required.
+Built with Python, Tkinter, Telethon, HTTPX, and SQLite. The interface is currently in Russian and uses a compact, dark blue theme. No bot, Docker, or external server is required.
 
 ## Features
 
@@ -18,6 +18,38 @@ Built with Python, Tkinter, Telethon, and SQLite. The interface is currently in 
 - Build a standalone macOS `.app` with an icon; CI produces an Apple Silicon artifact.
 - Browse saved messages in HTML; use JSONL, CSV, and SQLite for further processing.
 - Inspect persistent run logs, failed downloads, and gaps in message IDs.
+- Archive your accessible Edify courses, preserving course/module/lesson structure, text, photos, direct video files, presentations, and lesson attachments.
+- Refresh the Mini App catalogue to collect newly unlocked sections without downloading unchanged files again.
+
+## Edify Mini App archives
+
+Mini App observations and download results are also kept in a persistent history,
+independent of export folders: `.private/history/` for source runs, or
+`~/Library/Application Support/Telegram Archive/history/` for the bundled app
+(the data-directory override applies to both). `miniapps.sqlite3` is authoritative;
+`events.jsonl` is a readable event export. Source and bundled profiles are separate.
+Keep this history when removing downloaded materials; delete it only if explicitly
+requested. It records account/source scope, lesson IDs and titles, attachment slots,
+file identities, sizes, timestamps, status and SHA-256, without tokens, signed URLs,
+or lesson bodies. A changed source identity is distinguished from a new lesson or
+new attachment. Where both hashes exist, the journal records identical or different
+file bytes; it cannot determine whether exercises or scenes changed semantically.
+
+1. Connect the Telegram account that has access to [Edify](https://t.me/edify_platform_bot?profile). With several Desktop accounts, use **Подключить Telegram Desktop** to select the right one.
+2. Select **Мини-приложения** (Mini Apps) in the source selector above the list.
+3. Select **Edify · весь каталог** and click **Обновить и докачать** (Refresh and resume).
+4. Choose a destination folder. On later runs, choose the same parent folder to update that archive.
+5. Open **Открыть архив** (Open archive) to browse the offline catalogue. **Проблемные файлы** shows catalogue warnings and unfinished materials.
+
+The archive is stored under `miniapp_edify_<account-id>_<bot-id>/`. It contains a separate `catalogue.sqlite3`, `index.html`, `report.json`, readable lesson folders, `lesson.md` text files, and local media. Stable IDs keep renamed lessons from creating duplicate folders. Replaced source files get separate revision paths; previously saved material is retained when access or the remote catalogue changes.
+
+Each run reads the accessible catalogue before downloading files. Sections with no currently accessible lessons remain visible as **Материалы пока недоступны** (Materials not available yet). Run **Обновить и докачать** again when they open. A successful export means **all materials accessible now**, not the eventual contents of sections that will open later. Incomplete API responses and unsupported media are shown as limitations, rather than silently treated as success.
+
+Supported lesson media: Telegram-hosted MP4, uploaded direct files, slider images, Markdown images with stable Edify storage keys or unsigned public HTTPS URLs, PDF/PPTX presentations, and lesson material attachments. Text updates are reflected in the next offline export. External YouTube/Rutube/Kinescope playback, HLS/DASH, podcasts, tests/attestations, homework, and other Mini App providers are not implemented. Unsupported entries prevent a clean completion result and appear in the report. Browser screenshots and protected streaming playback are not used as substitutes for original files.
+
+Files download sequentially with bounded memory. Telegram videos with a stable file identity and known size support byte-range resume across restarts; non-versioned image/storage-key downloads restart safely if interrupted. SHA-256 detects changed local files. A server that ignores Range causes a clean restart, and invalid range responses are never appended. The app can renew expired signed links. Edify access tokens and signed media URLs stay in memory and are excluded from archive metadata and error messages.
+
+The Mini App integration uses Telegram's existing account session and read-only student endpoints. It does not mark lessons complete, update watch progress, submit homework, or log out of Telegram Desktop. Existing SOCKS5 settings apply to both Telegram and Edify HTTP requests. Only materials already available to the connected account are collected.
 
 ## Requirements
 
@@ -177,7 +209,18 @@ Exports stay in the folder you choose. If that folder is synced with iCloud or a
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The automated suite covers archive collection, resume, cancellation, retries, migration, gap handling, progress events, QR authentication, local-only sign-out, and Desktop session conversion. Tests use synthetic data and mocked Telegram clients; they do not require a real account or network access.
+The automated suite covers archive collection, resume, cancellation, retries, migration, gap handling, progress events, QR authentication, local-only sign-out, and Desktop session conversion. Mini App fixtures cover API contracts, multiple attachments, future section unlocks, photo/text export, byte-range validation, capped range responses, ignored ranges, expired links, disk space, local corruption, account ownership, and secret-free reports. Tests use synthetic data and mocked Telegram/HTTP clients; they do not require a real account or network access.
+
+`tools/check_edify.py` is a separate, explicit **live** acceptance tool. It reads the active Telegram Desktop authorization in memory, disconnects without logging out, and never prints tokens or signed URLs. Its `--account N` option selects a 1-based Desktop account index; otherwise it uses the active Desktop account. Choose an ignored output directory:
+
+```sh
+.venv/bin/python tools/check_edify.py --output outputs/edify-check --inspect
+.venv/bin/python tools/check_edify.py --output outputs/edify-check --stop-after-mib 8
+.venv/bin/python tools/check_edify.py --output outputs/edify-check
+.venv/bin/python tools/check_edify.py --output outputs/edify-check --compare-first
+```
+
+The last command independently reads the first video and compares its SHA-256 with the finished archive. This consumes additional network traffic. Do not commit downloaded courses, session data, or live test outputs.
 
 Native interface checks are opt-in and require a macOS desktop session:
 
